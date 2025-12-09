@@ -1,0 +1,24 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model SavedRequest {
+  id        String   @id @default(cuid())
+  name      String
+  url       String
+  method    String
+  headers   String   @default("")
+  body      String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppSettings {
+  id           String  @id @default("default")
+  useDatabase  Boolean @default(true)
+}
