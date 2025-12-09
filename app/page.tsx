@@ -8,18 +8,15 @@ import {
   ItemDescription,
   ItemHeader,
 } from "@/components/atoms/item";
-import { Input } from "@/components/atoms/input";
 import { Textarea } from "@/components/atoms/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/atoms/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/atoms/select";
-import { Label } from "@/components/atoms/label";
-import { Trash2, Database, HardDrive } from "lucide-react";
+import { Trash2, Database, HardDrive, Upload } from "lucide-react";
+import { RequestSection } from "@/components/molecules/RequestLayout/RequestSection";
+import { toast } from "sonner";
+import { getRequests, createRequest, deleteRequest as deleteRequestAction } from "@/app/actions/requests";
+import { getSettings, updateSettings } from "@/app/actions/settings";
+import { SavedRequestList } from "@/components/molecules/RequestLayout/SavedRequestList";
+import { Sidebar } from "@/components/molecules/Sidebar/Sidebar";
 
 interface SavedRequest {
   id: string;
@@ -67,25 +64,18 @@ export default function Home() {
       setStorageLoading(true);
       try {
         // Load settings
-        const settingsRes = await fetch("/api/settings");
-        if (settingsRes.ok) {
-          const settings = await settingsRes.json();
-          setUseDatabase(settings.useDatabase);
+        const settingsResult = await getSettings();
+        if (settingsResult.success && settingsResult.data) {
+          setUseDatabase(settingsResult.data.useDatabase);
         }
 
         // Load requests from database
-        const requestsRes = await fetch("/api/requests");
-        if (requestsRes.ok) {
-          const dbRequests = await requestsRes.json();
-          if (dbRequests.length > 0) {
-            setSavedRequests(dbRequests);
-          } else {
-            // Fallback to localStorage
-            const stored = localStorage.getItem(STORAGE_KEY);
-            if (stored) {
-              setSavedRequests(JSON.parse(stored));
-            }
-          }
+        const requestsResult = await getRequests();
+        if (requestsResult.success && requestsResult.data && requestsResult.data.length > 0) {
+          setSavedRequests(requestsResult.data.map(r => ({
+            ...r,
+            createdAt: r.createdAt?.toString(),
+          })));
         } else {
           // Fallback to localStorage
           const stored = localStorage.getItem(STORAGE_KEY);
@@ -112,11 +102,7 @@ export default function Home() {
     const newValue = !useDatabase;
     setUseDatabase(newValue);
     try {
-      await fetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ useDatabase: newValue }),
-      });
+      await updateSettings(newValue);
     } catch {
       // Silently fail, local state is already updated
     }
@@ -128,21 +114,26 @@ export default function Home() {
 
     if (useDatabase) {
       try {
-        const res = await fetch("/api/requests", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, url, method, headers, body }),
-        });
-        if (res.ok) {
-          const newRequest = await res.json();
-          setSavedRequests([newRequest, ...savedRequests].slice(0, 50));
+        const result = await createRequest({ name, url, method, headers, body });
+        if (result.success && result.data) {
+          setSavedRequests([{
+            ...result.data,
+            createdAt: result.data.createdAt?.toString(),
+          }, ...savedRequests].slice(0, 50));
+          toast.success("Request saved to database");
+        } else {
+          // Fallback to localStorage
+          saveToLocalStorage(name);
+          toast.warning("Database unavailable, saved to local storage");
         }
       } catch {
         // Fallback to localStorage
         saveToLocalStorage(name);
+        toast.warning("Request saved to local storage");
       }
     } else {
       saveToLocalStorage(name);
+      toast.success("Request saved to local storage");
     }
     setRequestName("");
   };
@@ -161,6 +152,50 @@ export default function Home() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
   };
 
+  // Sync local requests to database
+  const syncToDatabase = async () => {
+    if (savedRequests.length === 0) {
+      toast.error("No requests to sync");
+      return;
+    }
+
+    let synced = 0;
+    let failed = 0;
+
+    for (const req of savedRequests) {
+      const result = await createRequest({
+        name: req.name,
+        url: req.url,
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+      });
+      if (result.success) {
+        synced++;
+      } else {
+        failed++;
+      }
+    }
+
+    if (synced > 0) {
+      toast.success(`Synced ${synced} request${synced > 1 ? "s" : ""} to database`);
+      // Switch to database mode and reload
+      setUseDatabase(true);
+      await updateSettings(true);
+      // Reload requests from database
+      const requestsResult = await getRequests();
+      if (requestsResult.success && requestsResult.data) {
+        setSavedRequests(requestsResult.data.map(r => ({
+          ...r,
+          createdAt: r.createdAt?.toString(),
+        })));
+      }
+    }
+    if (failed > 0) {
+      toast.error(`Failed to sync ${failed} request${failed > 1 ? "s" : ""}`);
+    }
+  };
+
   // Load a saved request
   const loadRequest = (id: string) => {
     const request = savedRequests.find((r) => r.id === id);
@@ -173,17 +208,13 @@ export default function Home() {
   };
 
   // Delete a saved request
-  const deleteRequest = async (id: string, e: React.MouseEvent) => {
+  const handleDeleteRequest = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     const updated = savedRequests.filter((r) => r.id !== id);
     setSavedRequests(updated);
 
     if (useDatabase) {
-      try {
-        await fetch(`/api/requests?id=${id}`, { method: "DELETE" });
-      } catch {
-        // Already removed from state
-      }
+      await deleteRequestAction(id);
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
   };
@@ -250,263 +281,163 @@ export default function Home() {
     }
   };
 
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+
+  const handleLoadRequest = (id: string) => {
+    setActiveRequestId(id);
+    loadRequest(id);
+  };
+
   return (
-    <main className="min-h-screen bg-background p-8">
-      <div className="mx-auto max-w-4xl space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+    <main className="min-h-screen bg-background">
+      <div className="flex">
+        {/* Sidebar */}
+        <Sidebar
+          toggleStorage={toggleStorage}
+          storageLoading={storageLoading}
+          syncToDatabase={syncToDatabase}
+          useDatabase={useDatabase}
+          savedRequests={savedRequests}
+          activeRequestId={activeRequestId}
+          handleLoadRequest={handleLoadRequest}
+          handleDeleteRequest={handleDeleteRequest}
+        />
+
+        {/* Main Content */}
+        <div className="flex-1 p-8">
+          <div className="mx-auto max-w-4xl space-y-6">
             <h1 className="text-3xl font-bold">API Tester</h1>
-            {/* Storage Toggle */}
-            <button
-              onClick={toggleStorage}
-              disabled={storageLoading}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                useDatabase
-                  ? "bg-primary/10 text-primary"
-                  : "bg-muted text-muted-foreground"
-              }`}
-              title={useDatabase ? "Using Database" : "Using Local Storage"}
-            >
-              {useDatabase ? (
-                <>
-                  <Database className="size-4" />
-                  <span>DB</span>
-                </>
-              ) : (
-                <>
-                  <HardDrive className="size-4" />
-                  <span>Local</span>
-                </>
-              )}
-            </button>
-          </div>
-          
-          {/* Saved Requests Dropdown */}
-          {savedRequests.length > 0 && (
-            <Select onValueChange={loadRequest}>
-              <SelectTrigger className="w-72">
-                <SelectValue placeholder="Load saved request..." />
-              </SelectTrigger>
-              <SelectContent>
-                {savedRequests.map((req) => (
-                  <div key={req.id} className="flex items-center justify-between group">
-                    <SelectItem value={req.id} className="flex-1 pr-0">
-                      <span className="font-mono text-xs mr-2">{req.method}</span>
-                      <span className="truncate max-w-[180px]">{req.name}</span>
-                    </SelectItem>
-                    <button
-                      onClick={(e) => deleteRequest(req.id, e)}
-                      className="p-1.5 mr-2 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                      title="Delete request"
-                    >
-                      <Trash2 className="size-4" />
-                    </button>
-                  </div>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-        </div>
 
-        {/* Request Section */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Request</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex gap-2">
-              <Select value={method} onValueChange={setMethod}>
-                <SelectTrigger className="w-32">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="GET">GET</SelectItem>
-                  <SelectItem value="POST">POST</SelectItem>
-                  <SelectItem value="PUT">PUT</SelectItem>
-                  <SelectItem value="DELETE">DELETE</SelectItem>
-                  <SelectItem value="PATCH">PATCH</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                placeholder="Enter URL (e.g., https://api.example.com/data)"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                className="flex-1"
-              />
-              <button
-                onClick={handleRequest}
-                disabled={loading || !url}
-                className="rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                {loading ? "Sending..." : "Send"}
-              </button>
-            </div>
+            <RequestSection
+              method={method}
+              setMethod={setMethod}
+              url={url}
+              setUrl={setUrl}
+              handleRequest={handleRequest}
+              loading={loading}
+              requestName={requestName}
+              setRequestName={setRequestName}
+              saveRequest={saveRequest}
+              savedRequests={savedRequests}
+              setSavedRequests={setSavedRequests}
+              headers={headers}
+              setHeaders={setHeaders}
+              body={body}
+              setBody={setBody}
+              STORAGE_KEY={STORAGE_KEY}
+            />
 
-            {/* Save Request */}
-            <div className="flex gap-2">
-              <Input
-                placeholder="Request name (optional)"
-                value={requestName}
-                onChange={(e) => setRequestName(e.target.value)}
-                className="flex-1"
-              />
-              <button
-                onClick={saveRequest}
-                disabled={!url}
-                className="rounded-md border border-input px-4 py-2 hover:bg-accent disabled:opacity-50"
-              >
-                Save
-              </button>
-              {savedRequests.length > 0 && (
-                <button
-                  onClick={() => {
-                    if (confirm("Clear all saved requests?")) {
-                      setSavedRequests([]);
-                      localStorage.removeItem(STORAGE_KEY);
-                    }
-                  }}
-                  className="rounded-md border border-destructive px-4 py-2 text-destructive hover:bg-destructive/10"
-                >
-                  Clear All
-                </button>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="headers">Headers (one per line, format: Key: Value)</Label>
-              <Textarea
-                id="headers"
-                placeholder="Content-Type: application/json"
-                value={headers}
-                onChange={(e) => setHeaders(e.target.value)}
-                className="min-h-[80px] font-mono text-sm"
-              />
-            </div>
-
-            {method !== "GET" && (
-              <div className="space-y-2">
-                <Label htmlFor="body">Request Body (JSON)</Label>
-                <Textarea
-                  id="body"
-                  placeholder='{"key": "value"}'
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  className="min-h-[200px] font-mono text-sm"
-                />
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Questions Display */}
-        {parsedQuestions?.questions && (
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Verification Questions</CardTitle>
-                {parsedQuestions.authToken && (
-                  <code className="text-xs bg-muted px-2 py-1 rounded">
-                    authToken: {parsedQuestions.authToken}
-                  </code>
-                )}
-              </div>
-              {parsedQuestions.provider && (
-                <p className="text-sm text-muted-foreground">Provider: {parsedQuestions.provider}</p>
-              )}
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {parsedQuestions.questions.map((question, qIndex) => (
-                <div key={question.id} className="space-y-3">
-                  <p className="font-medium">
-                    {qIndex + 1}. {question.text}
-                  </p>
-                  <div className="grid gap-2 pl-4">
-                    {question.answers.map((answer) => (
-                      <label
-                        key={answer.id}
-                        className={`flex items-center gap-3 p-3 rounded-md border cursor-pointer transition-colors ${
-                          selectedAnswers[question.id] === answer.id
-                            ? "border-primary bg-primary/10"
-                            : "border-input hover:bg-accent"
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name={`question-${question.id}`}
-                          value={answer.id}
-                          checked={selectedAnswers[question.id] === answer.id}
-                          onChange={() =>
-                            setSelectedAnswers((prev) => ({
-                              ...prev,
-                              [question.id]: answer.id,
-                            }))
-                          }
-                          className="accent-primary"
-                        />
-                        <span>{answer.text}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              
-              {/* Show selected answers as JSON for next API call */}
-              {Object.keys(selectedAnswers).length > 0 && (
-                <div className="mt-6 p-4 bg-muted rounded-md">
-                  <p className="text-sm font-medium mb-2">Selected Answers (for next API call):</p>
-                  <pre className="text-xs overflow-auto">
-                    {JSON.stringify(
-                      {
-                        authToken: parsedQuestions.authToken,
-                        answers: Object.entries(selectedAnswers).map(([questionId, answerId]) => ({
-                          questionId,
-                          answerId,
-                        })),
-                      },
-                      null,
-                      2
+            {/* Questions Display */}
+            {parsedQuestions?.questions && (
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle>Verification Questions</CardTitle>
+                    {parsedQuestions.authToken && (
+                      <code className="text-xs bg-muted px-2 py-1 rounded">
+                        authToken: {parsedQuestions.authToken}
+                      </code>
                     )}
-                  </pre>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
+                  </div>
+                  {parsedQuestions.provider && (
+                    <p className="text-sm text-muted-foreground">Provider: {parsedQuestions.provider}</p>
+                  )}
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  {parsedQuestions.questions.map((question, qIndex) => (
+                    <div key={question.id} className="space-y-3">
+                      <p className="font-medium">
+                        {qIndex + 1}. {question.text}
+                      </p>
+                      <div className="grid gap-2 pl-4">
+                        {question.answers.map((answer) => (
+                          <label
+                            key={answer.id}
+                            className={`flex items-center gap-3 p-3 rounded-md border cursor-pointer transition-colors ${
+                              selectedAnswers[question.id] === answer.id
+                                ? "border-primary bg-primary/10"
+                                : "border-input hover:bg-accent"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name={`question-${question.id}`}
+                              value={answer.id}
+                              checked={selectedAnswers[question.id] === answer.id}
+                              onChange={() =>
+                                setSelectedAnswers((prev) => ({
+                                  ...prev,
+                                  [question.id]: answer.id,
+                                }))
+                              }
+                              className="accent-primary"
+                            />
+                            <span>{answer.text}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {/* Show selected answers as JSON for next API call */}
+                  {Object.keys(selectedAnswers).length > 0 && (
+                    <div className="mt-6 p-4 bg-muted rounded-md">
+                      <p className="text-sm font-medium mb-2">Selected Answers (for next API call):</p>
+                      <pre className="text-xs overflow-auto">
+                        {JSON.stringify(
+                          {
+                            authToken: parsedQuestions.authToken,
+                            answers: Object.entries(selectedAnswers).map(([questionId, answerId]) => ({
+                              questionId,
+                              answerId,
+                            })),
+                          },
+                          null,
+                          2
+                        )}
+                      </pre>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
-        {/* Response Section */}
-        <Item variant="outline" className="flex-col items-start">
-          <ItemHeader>
-            <ItemTitle>Raw Response</ItemTitle>
-            {status && (
-              <span
-                className={`rounded px-2 py-1 text-xs font-medium ${
-                  status >= 200 && status < 300
-                    ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                    : status >= 400
-                    ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                    : "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
-                }`}
-              >
-                Status: {status}
-              </span>
-            )}
-          </ItemHeader>
-          <ItemContent className="w-full">
-            {error && (
-              <ItemDescription className="text-red-500">{error}</ItemDescription>
-            )}
-            {response && (
-              <Textarea
-                readOnly
-                value={response}
-                className="min-h-[300px] font-mono text-sm"
-              />
-            )}
-            {!response && !error && (
-              <ItemDescription>Send a request to see the response</ItemDescription>
-            )}
-          </ItemContent>
-        </Item>
+            {/* Response Section */}
+            <Item variant="outline" className="flex-col items-start">
+              <ItemHeader>
+                <ItemTitle>Raw Response</ItemTitle>
+                {status && (
+                  <span
+                    className={`rounded px-2 py-1 text-xs font-medium ${
+                      status >= 200 && status < 300
+                        ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                        : status >= 400
+                        ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                        : "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200"
+                    }`}
+                  >
+                    Status: {status}
+                  </span>
+                )}
+              </ItemHeader>
+              <ItemContent className="w-full">
+                {error && (
+                  <ItemDescription className="text-red-500">{error}</ItemDescription>
+                )}
+                {response && (
+                  <Textarea
+                    readOnly
+                    value={response}
+                    className="min-h-[300px] font-mono text-sm"
+                  />
+                )}
+                {!response && !error && (
+                  <ItemDescription>Send a request to see the response</ItemDescription>
+                )}
+              </ItemContent>
+            </Item>
+          </div>
+        </div>
       </div>
     </main>
   );

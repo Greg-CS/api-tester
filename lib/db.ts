@@ -1,15 +1,20 @@
 import { PrismaClient } from "../prisma/generated/prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
-import pg from "pg";
 
-const connectionString = process.env.DATABASE_URL!;
-const pool = new pg.Pool({ connectionString });
-const adapter = new PrismaPg(pool);
+let prismaInstance: PrismaClient | null = null;
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
-};
+if (process.env.DATABASE_URL) {
+  const globalForPrisma = globalThis as unknown as {
+    prisma: PrismaClient | undefined;
+  };
 
-export const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter });
+  if (!globalForPrisma.prisma) {
+    // Use accelerateUrl for Prisma Accelerate connections
+    globalForPrisma.prisma = new PrismaClient({
+      accelerateUrl: process.env.DATABASE_URL,
+    });
+  }
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+  prismaInstance = globalForPrisma.prisma;
+}
+
+export const prisma = prismaInstance;
